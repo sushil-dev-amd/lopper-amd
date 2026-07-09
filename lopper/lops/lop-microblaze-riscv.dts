@@ -89,8 +89,14 @@
                                from pprint import pprint
                                for n in tree.__selected__:
                                    pprint(vars(n['xlnx,data-size']))
+                                   use_embedded = n.propval('xlnx,use-embedded')
+                                   is_embedded = use_embedded != [''] and use_embedded[0] == 1
                                    if n['xlnx,data-size'].value[0] == 64:
+                                       if is_embedded:
+                                           print('WARNING: {}: xlnx,use-embedded is set but xlnx,data-size is 64; RV32E is a 32-bit-only ISA. Ignoring xlnx,use-embedded and generating rv64i flags.'.format(n.abs_path))
                                        n['xlnx,data-size'].tunes = 'rv64i'
+                                   elif is_embedded:
+                                       n['xlnx,data-size'].tunes = 'rv32e'
                                    else:
                                        n['xlnx,data-size'].tunes = 'rv32i'
                           ";
@@ -152,10 +158,21 @@
                                        archflags.append('_zicbom')
                                        bsp_archflags.append('_zicbom')
 
+                                   use_embedded = n.propval('xlnx,use-embedded')
+                                   is_embedded = use_embedded != [''] and use_embedded[0] == 1 and n['xlnx,data-size'].value[0] != 64
+
+                                   if is_embedded and n['xlnx,use-fpu'].value[0] != 0:
+                                       raise Exception('Invalid MicroBlaze-V configuration at {}: xlnx,use-embedded=1 (RV32E/ilp32e) is not compatible with a hardware FPU (xlnx,use-fpu={}). The RV32E ABI has no standard hard-float variant; disable the FPU or the embedded (RV32E) option.'.format(n.abs_path, n['xlnx,use-fpu'].value[0]))
+
                                    if n['xlnx,data-size'].value[0] == 64:
-                                       archflags.append(' -mabi=lp64') 
+                                       archflags.append(' -mabi=lp64')
+                                       bsp_archflags.append(' -mabi=lp64')
+                                   elif is_embedded:
+                                       archflags.append(' -mabi=ilp32e')
+                                       bsp_archflags.append(' -mabi=ilp32e')
                                    else:
-                                       archflags.append(' -mabi=ilp32') 
+                                       archflags.append(' -mabi=ilp32')
+                                       bsp_archflags.append(' -mabi=ilp32')
 
                                    if n['xlnx,use-fpu'].value[0] == 1:
                                        archflags.append('f') 
