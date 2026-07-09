@@ -71,6 +71,31 @@ from .memviz import (
     render_memory_map,
 )
 
+# Re-export schema validation functions and classes
+from .schema import (
+    # Data classes (note: ConstraintType is re-exported from lopper.schema.core)
+    ConstraintType,
+    PropertyConstraint,  # Alias for lopper.schema.core.Constraint
+    NodeConstraints,
+    # Constraint definitions
+    NODE_PROPERTY_CONSTRAINTS,
+    # Validation functions (dt-schema based)
+    check_forbidden_properties,
+    check_required_properties,
+    check_property_values,
+    check_mutex_properties,
+    # Validation functions (learned schema based)
+    check_learned_type_violations,
+    check_type_frequency_anomalies,
+    # Validator class
+    SchemaValidator,
+    # Convenience function
+    validate_schema,
+)
+
+# Also export Constraint directly for code using the new unified name
+from lopper.schema.core import Constraint
+
 # Define what is exported when using `from lopper.audit import *`
 __all__ = [
     # Base framework classes
@@ -102,10 +127,29 @@ __all__ = [
     'check_domain_memory_overlaps',
     'check_cross_domain_memory_overlaps',
     'check_carveout_in_reserved_memory',
-    # Validator
+    # Memory validator
     'MemoryValidator',
     'validate_memory',
     # Visualization
     'MemoryVisualizer',
     'render_memory_map',
+    # Schema enums
+    'ConstraintType',
+    # Schema data classes
+    'Constraint',  # New unified name
+    'PropertyConstraint',  # Alias for Constraint (backwards compatibility)
+    'NodeConstraints',
+    # Schema constraints
+    'NODE_PROPERTY_CONSTRAINTS',
+    # Schema validation functions (dt-schema based)
+    'check_forbidden_properties',
+    'check_required_properties',
+    'check_property_values',
+    'check_mutex_properties',
+    # Schema validation functions (learned schema based)
+    'check_learned_type_violations',
+    'check_type_frequency_anomalies',
+    # Schema validator
+    'SchemaValidator',
+    'validate_schema',
 ]

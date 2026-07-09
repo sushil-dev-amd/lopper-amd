@@ -1,5 +1,5 @@
 #/*
-# * Copyright (c) 2020 - 2025 Xilinx Inc. All rights reserved.
+# * Copyright (c) 2020 - 2026 Xilinx Inc. All rights reserved.
 # *
 # * Author:
 # *       Appana Durga Kedareswara rao <appana.durga.rao@xilinx.com>
@@ -202,7 +202,7 @@ struct xtopology_t xtopology[] = {{'''
     }},'''
     topology_str += f'''
     {{
-        NULL
+        0
     }}
 }};'''
     topology_fd.write(topology_str)
@@ -333,7 +333,9 @@ def generate_hwtocmake_medata(sdt, node_list, src_path, repo_path_data, options,
             cmake_submachine = ""
 
             match_cpunode = bm_config.get_cpu_node(sdt, options)
-
+            # check cpm6 is supported
+            if match_cpunode.props('xlnx,cpm6_supported'):
+                fd.write(f'set(CPM6_SUPPORTED "ON" CACHE STRING "CPM6 Supported")\n')
             family = sdt.tree['/'].propval('family', list)
             if family[0]:
                 if family[0] == "Versal_2VE_2VM":

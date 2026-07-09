@@ -122,6 +122,17 @@ cdns,i2c-r1p14:
     - '#address-cells'
     - '#size-cells'
 
+snps,dw-i3c-master-1.00a:
+  required:
+    - compatible
+    - status
+    - reg
+    - interrupts
+    - interrupt-parent
+    - clocks
+    - '#address-cells'
+    - '#size-cells'
+
 xlnx,xps-gpio-1.00.a:
   required:
     - compatible
@@ -237,7 +248,6 @@ xlnx,zynqmp-dma-1.0:
     - interrupts
     - clocks
     - clock-names
-    - xlnx,bus-width
 
 amd,versal2-dma-1.0:
   required:
@@ -247,7 +257,6 @@ amd,versal2-dma-1.0:
     - interrupts
     - clocks
     - clock-names
-    - xlnx,bus-width
 
 xlnx,versal-gpio-1.0:
   required:
@@ -440,3 +449,10 @@ cdns,ttc:
     - interrupts
     - interrupt-names
     - clock-frequency
+
+xlnx,iomodule-3.1:
+  required:
+    - reg
+    - compatible
+    - interrupts
+    - interrupt-parent

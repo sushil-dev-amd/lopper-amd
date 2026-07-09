@@ -1022,9 +1022,10 @@ def openamp_remote_cpu_expand( tree, subnode, cluster_cpu, cluster_node, verbose
         if n.name == "domain-to-domain":
             n + LopperProp(name="cluster_cpu", value=cluster_cpu)
 
-    pd_prop_node = [ n for n in cluster_node.subnodes() if n.propval("power-domains") != [''] ]
-    if len(pd_prop_node) == 1:
-        subnode + LopperProp(name="rpu_pd_val", value=pd_prop_node[0].propval("power-domains"))
+    if cluster_node is not None:
+        pd_prop_node = [ n for n in cluster_node.subnodes() if n.propval("power-domains") != [''] ]
+        if len(pd_prop_node) == 1:
+            subnode + LopperProp(name="rpu_pd_val", value=pd_prop_node[0].propval("power-domains"))
 
     if cluster_node != None and "r5" in cluster_node.name:
         subnode + LopperProp(name="cpu_config_str", value="lockstep" if check_bit_set(subnode.propval("cpus")[2], 30) else "split")
@@ -1050,6 +1051,7 @@ def cpu_expand( tree, subnode, verbose = 0):
     verbose = 0
     cpus_list = []
     cluster_cpu = None
+    cluster_node = None
     for c in cpus[0]:
         # empty dict ? if so, skip
         if not c:
@@ -1062,7 +1064,11 @@ def cpu_expand( tree, subnode, verbose = 0):
                 print( f"         mode: {c['mode']}" )
 
         if type(c) == dict:
-            cluster = c['cluster']
+            # Support both 'cluster' (traditional) and 'dev' (sdt_devices) keys
+            cluster = c.get('cluster') or c.get('dev')
+            if not cluster:
+                # Skip CPU entries without cluster/dev info
+                continue
             if 'cluster_cpu' in c.keys():
                 cluster_cpu = c['cluster_cpu']
         else:
@@ -1098,35 +1104,38 @@ def cpu_expand( tree, subnode, verbose = 0):
         # */
         if type(c) == dict:
             mode_mask = 0
-            mode = c['mode']
-            if mode:
-                try:
-                    secure = mode['secure']
-                    if secure:
-                        mode_mask = set_bit( mode_mask, 31 )
-                except:
-                    pass
-
-                try:
-                    lockstep = mode['lockstep']
-                    if lockstep:
-                        mode_mask = set_bit( mode_mask, 30 )
-                except:
-                    pass
-
-                try:
-                    el = mode['el']
-                    if el:
-                        mode_mask = set_bit( mode_mask, 0 )
-                        mode_mask = set_bit( mode_mask, 1 )
-                except:
-                    pass
-
-            mask = c['cpumask']
             try:
-                mask = int(mask,16)
+                mode = c['mode']
+                if mode:
+                    try:
+                        secure = mode['secure']
+                        if secure:
+                            mode_mask = set_bit( mode_mask, 31 )
+                    except:
+                        pass
+
+                    try:
+                        lockstep = mode['lockstep']
+                        if lockstep:
+                            mode_mask = set_bit( mode_mask, 30 )
+                    except:
+                        pass
+
+                    try:
+                        el = mode['el']
+                        if el:
+                            mode_mask = set_bit( mode_mask, 0 )
+                            mode_mask = set_bit( mode_mask, 1 )
+                    except:
+                        pass
             except:
                 pass
+
+            try:
+                mask = c['cpumask']
+                mask = int(mask,16)
+            except:
+                mask = 0
         else:
             mode_mask = 0x0
             mask = 0x0
@@ -1692,7 +1701,12 @@ def xlnx_timer_expand(tree, subnode, verbose = 0 ):
         if isinstance(timer_pval, str):
             timer_pval = [ timer_pval ]
         for label in timer_pval:
-            timer_node = [ n for n in tree["/axi"].subnodes(children_only=True, name="timer@*") if n.label == label ]
+            timer_node = []
+            if "/axi" in tree:
+                timer_node = [ n for n in tree["/axi"].subnodes(children_only=True, name="timer@*") if n.label == label ]
+            if timer_node == []:
+                # Versal2 and other SoCs place timers at root level, not under /axi
+                timer_node = [ n for n in tree["/"].subnodes(name="timer@*") if n.label == label ]
             if timer_node == []:
                 lopper.log._error("ERROR: xlnx_timer_expand requires timer label reference")
                 return False

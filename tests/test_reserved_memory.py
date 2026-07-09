@@ -189,17 +189,31 @@ class TestReservedMemoryRefcounting:
     """Test explicit refcounting for reserved-memory nodes."""
 
     def test_refcount_code_exists(self):
-        """Test that reserved-memory refcounting code is present in domain_access."""
+        """Test that reserved-memory survival tables and pre-pass are present in domain_access."""
         import inspect
         from lopper.assists import domain_access
 
+        # Check module-level data tables exist
+        assert hasattr(domain_access, 'RESMEM_ALWAYS_SURVIVE'), \
+            "RESMEM_ALWAYS_SURVIVE table not found in domain_access module"
+        assert hasattr(domain_access, 'RESMEM_SURVIVE_IF_CLAIMED'), \
+            "RESMEM_SURVIVE_IF_CLAIMED table not found in domain_access module"
+
+        # Check that canonical always-survive and survive-if-claimed entries are present
+        assert "openamp,domain-memory-v1" in domain_access.RESMEM_ALWAYS_SURVIVE, \
+            "openamp,domain-memory-v1 missing from RESMEM_ALWAYS_SURVIVE"
+        assert "openamp,xlnx,mem-carveout" in domain_access.RESMEM_SURVIVE_IF_CLAIMED, \
+            "openamp,xlnx,mem-carveout missing from RESMEM_SURVIVE_IF_CLAIMED"
+
         source = inspect.getsource(domain_access.core_domain_access)
 
-        # Check for the refcounting code markers
-        assert "reserved-memory node references" in source, \
-            "Reserved-memory refcounting section not found in core_domain_access"
-        assert "keep_all_domain_reserved_memory" in source, \
-            "Reserved-memory conditional flag not found"
+        # Check for pre-pass and fallback handling
+        assert "lopper,no-ref-required" in source, \
+            "lopper,no-ref-required fallback not found in core_domain_access"
+        assert "RESMEM_ALWAYS_SURVIVE" in source, \
+            "RESMEM_ALWAYS_SURVIVE usage not found in core_domain_access"
+        assert "RESMEM_SURVIVE_IF_CLAIMED" in source, \
+            "RESMEM_SURVIVE_IF_CLAIMED usage not found in core_domain_access"
 
 
 class TestPhandleRefTest:
@@ -544,8 +558,14 @@ class TestReservedMemoryFullPipeline:
     - phandle indexing in __pnodes__
     """
 
-    def test_full_pipeline_reserved_memory_pruning(self, test_outdir):
-        """Test that unreferenced reserved-memory nodes are pruned through full pipeline."""
+    def test_full_pipeline_reserved_memory_survival(self, test_outdir):
+        """Test that all /reserved-memory nodes survive through the full pipeline.
+
+        All /reserved-memory nodes pass through domain_access unconditionally.
+        Every node in /reserved-memory is either an original SDT node or a
+        top-level YAML declaration — both are global platform truths, not
+        domain-specific carveouts that could cause cross-domain contamination.
+        """
         sdt_file = "lopper/selftest/reserved-memory-test-sdt.dts"
         yaml_file = "lopper/selftest/domains/reserved-memory-e2e-domain.yaml"
 
@@ -606,12 +626,12 @@ class TestReservedMemoryFullPipeline:
                     break
             assert found, f"Referenced node {name} not found (should survive filtering)"
 
-        # Check unreferenced node was pruned
-        for child in resmem.subnodes(children_only=True):
-            assert 'unused@50000000' not in child.name, \
-                f"Unreferenced node {child.name} should have been pruned"
-            assert 'unreferenced' not in child.name, \
-                f"Unreferenced node {child.name} should have been pruned"
+        # Check that formerly-unreferenced nodes also survive — all /reserved-memory
+        # nodes pass through unconditionally as global platform declarations.
+        all_children = {c.name for c in resmem.subnodes(children_only=True)}
+        for name in ('unused@50000000',):
+            assert name in all_children, \
+                f"{name} should survive — all /reserved-memory nodes pass through"
 
         device_tree.cleanup()
 
@@ -719,3 +739,378 @@ class TestReservedMemoryFullPipeline:
                         f"pnode({ph}) returned node with different phandle {node.phandle}"
 
         device_tree.cleanup()
+
+
+class TestReservedMemorySurvivalRules:
+    """Behavioral tests for the compatible-string-driven survival pre-pass.
+
+    Each test targets a specific survival rule in core_domain_access():
+
+      openamp,domain-memory-v1   -- always survives, unconditionally
+      openamp,xlnx,mem-carveout  -- survives only if target domain claims it
+      lopper,no-ref-required     -- forces survival; property stripped from output
+      shared-dma-pool (no ref)   -- pruned (reference-gated, no consumer)
+      shared-dma-pool (ref)      -- survives via memory-region reference (step 1a)
+
+    Fixtures: lopper/selftest/reserved-memory-survival-sdt.dts
+              lopper/selftest/domains/reserved-memory-linux-survival-domain.yaml
+              lopper/selftest/domains/reserved-memory-rpu-survival-domain.yaml
+    """
+
+    SDT        = "lopper/selftest/reserved-memory-survival-sdt.dts"
+    LINUX_YAML = "lopper/selftest/domains/reserved-memory-linux-survival-domain.yaml"
+    RPU_YAML   = "lopper/selftest/domains/reserved-memory-rpu-survival-domain.yaml"
+
+    def _run_pipeline(self, test_outdir, yaml_file, target, output_name):
+        """Run the full domain_access pipeline and return the LopperSDT instance."""
+        if not os.path.exists(self.SDT) or not os.path.exists(yaml_file):
+            pytest.skip("Test fixture files not found")
+
+        device_tree = LopperSDT(self.SDT)
+        device_tree.dryrun = False
+        device_tree.verbose = 0
+        device_tree.werror = False
+        device_tree.output_file = os.path.join(test_outdir, output_name)
+        device_tree.cleanup_flag = True
+        device_tree.save_temps = False
+        device_tree.enhanced = True
+        device_tree.outdir = test_outdir
+
+        input_files = [yaml_file]
+        auto_assists = device_tree.find_any_matching_assists(input_files)
+        device_tree.setup(device_tree.dts, input_files + auto_assists, "", True, libfdt=True)
+        device_tree.target = target
+        device_tree.assists_setup(["lopper/assists/domain_access.py"])
+        device_tree.assist_autorun_setup("lopper/assists/domain_access", ["-t", target])
+        device_tree.perform_lops()
+
+        return device_tree
+
+    def _resmem_children(self, tree):
+        """Return a dict of name -> node for /reserved-memory children."""
+        try:
+            resmem = tree['/reserved-memory']
+            return {child.name: child for child in resmem.subnodes(children_only=True)}
+        except Exception:
+            return {}
+
+    # -----------------------------------------------------------------------
+    # Linux domain tests
+    # -----------------------------------------------------------------------
+
+    def test_domain_memory_v1_always_survives_linux(self, test_outdir):
+        """openamp,domain-memory-v1 survives in Linux output with no memory-region ref."""
+        dt = self._run_pipeline(test_outdir, self.LINUX_YAML,
+                                "/domains/APU_Linux", "linux-domainmem.dts")
+        children = self._resmem_children(dt.tree)
+        assert "memory_r5@0" in children, \
+            "memory_r5@0 (domain-memory-v1) should survive unconditionally in Linux output"
+        dt.cleanup()
+
+    def test_no_ref_required_survives_linux(self, test_outdir):
+        """lopper,no-ref-required node survives in Linux output."""
+        dt = self._run_pipeline(test_outdir, self.LINUX_YAML,
+                                "/domains/APU_Linux", "linux-noreq.dts")
+        children = self._resmem_children(dt.tree)
+        assert "no_ref_region@3ef00000" in children, \
+            "no_ref_region (lopper,no-ref-required) should survive in Linux output"
+        dt.cleanup()
+
+    def test_no_ref_required_property_stripped_linux(self, test_outdir):
+        """lopper,no-ref-required property is stripped from the output node."""
+        dt = self._run_pipeline(test_outdir, self.LINUX_YAML,
+                                "/domains/APU_Linux", "linux-noreq-strip.dts")
+        children = self._resmem_children(dt.tree)
+        if "no_ref_region@3ef00000" not in children:
+            pytest.skip("no_ref_region not in output -- covered by survival test")
+        node = children["no_ref_region@3ef00000"]
+        prop = node.propval("lopper,no-ref-required")
+        assert prop in ([], ['']), \
+            "lopper,no-ref-required should be stripped from output node"
+        dt.cleanup()
+
+    def test_reference_gated_survives_linux(self, test_outdir):
+        """shared-dma-pool with memory-region ref survives via step 1a."""
+        dt = self._run_pipeline(test_outdir, self.LINUX_YAML,
+                                "/domains/APU_Linux", "linux-ref-gate.dts")
+        children = self._resmem_children(dt.tree)
+        assert "cma_pool@10000000" in children, \
+            "cma_pool (referenced by ethernet0) should survive in Linux output"
+        dt.cleanup()
+
+    def test_unreferenced_shared_dma_pool_survives_linux(self, test_outdir):
+        """shared-dma-pool with no memory-region ref survives in Linux output.
+
+        All /reserved-memory nodes pass through unconditionally. Every node in
+        /reserved-memory is either an original SDT node or a top-level YAML
+        declaration — both are global platform truths, not domain-specific
+        carveouts.  Filtering would incorrectly hide PLM/TF-A reservations
+        and similar firmware regions from OS outputs that need to see them.
+        """
+        dt = self._run_pipeline(test_outdir, self.LINUX_YAML,
+                                "/domains/APU_Linux", "linux-prune.dts")
+        children = self._resmem_children(dt.tree)
+        assert "unused_cma@20000000" in children, \
+            "unused_cma should survive — all /reserved-memory nodes pass through"
+        dt.cleanup()
+
+    def test_unclaimed_carveouts_survive_linux(self, test_outdir):
+        """openamp,xlnx,mem-carveout nodes survive even if not claimed by Linux domain.
+
+        Survival is unconditional for all /reserved-memory nodes.  The unclaimed
+        compatible check is advisory only: it emits a warning so the user can
+        verify the omission is intentional, but does not prune the node.
+        """
+        dt = self._run_pipeline(test_outdir, self.LINUX_YAML,
+                                "/domains/APU_Linux", "linux-carveout-prune.dts")
+        children = self._resmem_children(dt.tree)
+        for name in ("rpu0vdev0vring0@3ed00000", "rpu0vdev0vring1@3ed04000",
+                     "unclaimed_rpu@3ee00000"):
+            assert name in children, \
+                f"{name} should survive — all /reserved-memory nodes pass through"
+        dt.cleanup()
+
+    # -----------------------------------------------------------------------
+    # RPU domain tests
+    # -----------------------------------------------------------------------
+
+    def test_mem_carveout_survives_when_claimed_rpu(self, test_outdir):
+        """openamp,xlnx,mem-carveout survives when listed in domain reserved-memory."""
+        dt = self._run_pipeline(test_outdir, self.RPU_YAML,
+                                "/domains/RPU_domain", "rpu-carveout-survive.dts")
+        children = self._resmem_children(dt.tree)
+        for name in ("rpu0vdev0vring0@3ed00000", "rpu0vdev0vring1@3ed04000"):
+            assert name in children, \
+                f"{name} (claimed by RPU domain) should survive in RPU output"
+        dt.cleanup()
+
+    def test_unclaimed_carveout_survives_rpu(self, test_outdir):
+        """openamp,xlnx,mem-carveout NOT in domain reserved-memory still survives.
+
+        Survival is unconditional.  The compatible check emits an advisory
+        warning but does not prune — the node is a global platform declaration.
+        """
+        dt = self._run_pipeline(test_outdir, self.RPU_YAML,
+                                "/domains/RPU_domain", "rpu-carveout-prune.dts")
+        children = self._resmem_children(dt.tree)
+        assert "unclaimed_rpu@3ee00000" in children, \
+            "unclaimed_rpu should survive — all /reserved-memory nodes pass through"
+        dt.cleanup()
+
+    def test_domain_memory_v1_always_survives_rpu(self, test_outdir):
+        """openamp,domain-memory-v1 also survives unconditionally in non-Linux output."""
+        dt = self._run_pipeline(test_outdir, self.RPU_YAML,
+                                "/domains/RPU_domain", "rpu-domainmem.dts")
+        children = self._resmem_children(dt.tree)
+        assert "memory_r5@0" in children, \
+            "memory_r5@0 (domain-memory-v1) should survive unconditionally in RPU output"
+        dt.cleanup()
+
+    def test_no_ref_required_survives_rpu(self, test_outdir):
+        """lopper,no-ref-required also works in a non-Linux domain."""
+        dt = self._run_pipeline(test_outdir, self.RPU_YAML,
+                                "/domains/RPU_domain", "rpu-noreq.dts")
+        children = self._resmem_children(dt.tree)
+        assert "no_ref_region@3ef00000" in children, \
+            "no_ref_region (lopper,no-ref-required) should survive in RPU output"
+        dt.cleanup()
+
+
+class TestEmptyPropMergeBooleanBug:
+    """Regression tests for EMPTY property merge with boolean/real-data values.
+
+    Covers the bug where YAML 'ranges: true' (encoded as [1] via bool_as_int=True)
+    clobbered an EMPTY-typed 'ranges;' property during merge, producing
+    'ranges = <0x1>;' instead of 'ranges;' in the output.
+
+    Also covers:
+    - bool_as_int=False path: 'ranges: true' must produce [''] not None/[None]
+    - boolean false: EMPTY property should be removed when incoming is [0]
+    - real range data: EMPTY property should be replaced and ptype updated
+    """
+
+    def _make_empty_prop(self, name):
+        """Return a LopperProp with ptype EMPTY (simulating FDT zero-length load)."""
+        from lopper.fmt import LopperFmt
+        prop = LopperProp(name, value=[''])
+        prop.ptype = LopperFmt.EMPTY
+        return prop
+
+    def _make_prop(self, name, value, ptype=None):
+        """Return a LopperProp with the given value and optional ptype."""
+        from lopper.fmt import LopperFmt
+        prop = LopperProp(name, value=value)
+        if ptype is not None:
+            prop.ptype = ptype
+        return prop
+
+    def test_bool_true_int_preserves_empty_property(self):
+        """Merging [1] (bool_as_int=True encoding) into EMPTY prop preserves flag."""
+        from lopper.fmt import LopperFmt
+        base = self._make_empty_prop('ranges')
+        incoming = self._make_prop('ranges', [1])
+
+        base.merge(incoming, clobber=True)
+
+        assert base.value == [''], \
+            f"Expected [''] (flag preserved), got {base.value!r}"
+        assert base.ptype == LopperFmt.EMPTY, \
+            "ptype should remain EMPTY after boolean-true merge"
+
+    def test_bool_true_bare_preserves_empty_property(self):
+        """Merging bare True into EMPTY prop preserves flag."""
+        from lopper.fmt import LopperFmt
+        base = self._make_empty_prop('no-map')
+        incoming = self._make_prop('no-map', True)
+
+        base.merge(incoming, clobber=True)
+
+        assert base.value == [''], \
+            f"Expected [''] (flag preserved), got {base.value!r}"
+
+    def test_bool_false_int_removes_empty_property(self):
+        """Merging [0] into EMPTY prop removes the property from its node."""
+        from lopper.fmt import LopperFmt
+        node = LopperNode(-1, "/test")
+        tree = LopperTree()
+        tree.add(node)
+
+        base = self._make_empty_prop('no-map')
+        node + base
+
+        incoming = self._make_prop('no-map', [0])
+        base.merge(incoming, clobber=True)
+
+        assert 'no-map' not in node.__props__, \
+            "Property should be removed when incoming boolean is false"
+
+    def test_real_range_data_replaces_empty_and_updates_ptype(self):
+        """Merging real range values into EMPTY prop adopts value and fixes ptype."""
+        from lopper.fmt import LopperFmt
+        base = self._make_empty_prop('ranges')
+        incoming = self._make_prop('ranges', [0x0, 0x0, 0x40000000],
+                                   ptype=LopperFmt.UINT32)
+
+        base.merge(incoming, clobber=True)
+
+        assert base.value == [0x0, 0x0, 0x40000000], \
+            f"Expected real range values, got {base.value!r}"
+        assert base.ptype == LopperFmt.UINT32, \
+            "ptype should be updated to UINT32 when real data replaces EMPTY flag"
+
+    def test_empty_to_empty_merge_is_noop(self):
+        """Merging [''] (DTS flag) into EMPTY prop is a no-op."""
+        from lopper.fmt import LopperFmt
+        base = self._make_empty_prop('ranges')
+        incoming = self._make_empty_prop('ranges')
+
+        base.merge(incoming, clobber=True)
+
+        assert base.value == [''], \
+            f"Expected [''] unchanged, got {base.value!r}"
+        assert base.ptype == LopperFmt.EMPTY
+
+
+class TestYAMLBooleanFalseEncoding:
+    """Regression tests for yaml.py boolean encoding with bool_as_int=False.
+
+    When bool_as_int=False, 'flag: true' was producing None (then [None])
+    instead of [''] (the canonical EMPTY/flag representation). This caused
+    garbled output when such values reached resolve() or merge().
+    """
+
+    def _yaml_tree(self, tmp_path, yaml_content, boolean_as_int):
+        """Write yaml_content to a temp file, load with given boolean_as_int setting."""
+        from lopper.yaml import LopperYAML
+        yaml_file = str(tmp_path / "test.yaml")
+        with open(yaml_file, 'w') as f:
+            f.write(yaml_content)
+        yaml_obj = LopperYAML(yaml_file)
+        yaml_obj.boolean_as_int = boolean_as_int
+        # Re-load with the overridden setting so boolean_as_int takes effect
+        yaml_obj.dct = None
+        yaml_obj.load_yaml(yaml_file)
+        return yaml_obj.to_tree()
+
+    def test_bool_true_produces_empty_string_list(self, tmp_path):
+        """With bool_as_int=False, boolean true must produce [''] not [None]."""
+        yaml_content = "test-node:\n  ranges: true\n  no-map: true\n"
+        tree = self._yaml_tree(tmp_path, yaml_content, boolean_as_int=False)
+
+        test_node = tree["/test-node"]
+        assert test_node is not None, "/test-node not found"
+
+        ranges_prop = test_node.props("ranges")
+        assert ranges_prop, "ranges property not found"
+        assert ranges_prop[0].value in ([], ['']), \
+            f"Expected empty flag value for boolean true, got {ranges_prop[0].value!r}"
+
+        nomap_prop = test_node.props("no-map")
+        assert nomap_prop, "no-map property not found"
+        assert nomap_prop[0].value in ([], ['']), \
+            f"Expected empty flag value for no-map boolean true, got {nomap_prop[0].value!r}"
+
+    def test_bool_false_skips_property(self, tmp_path):
+        """With bool_as_int=False, boolean false must not produce the property."""
+        yaml_content = "test-node:\n  no-map: false\n  other-prop: 42\n"
+        tree = self._yaml_tree(tmp_path, yaml_content, boolean_as_int=False)
+
+        test_node = tree["/test-node"]
+        assert test_node is not None, "/test-node not found"
+
+        nomap_prop = test_node.props("no-map")
+        assert not nomap_prop, \
+            "no-map property should not exist when boolean is false with bool_as_int=False"
+
+    def test_bool_true_with_bool_as_int_produces_empty(self, tmp_path):
+        """Boolean true always produces [''] regardless of bool_as_int setting.
+
+        bool_as_int only affects false encoding ([0] vs skip); true always
+        maps to an empty/flag DT property.
+        """
+        yaml_content = "test-node:\n  ranges: true\n"
+        tree = self._yaml_tree(tmp_path, yaml_content, boolean_as_int=True)
+
+        test_node = tree["/test-node"]
+        ranges_prop = test_node.props("ranges")
+        assert ranges_prop, "ranges property not found"
+        assert ranges_prop[0].value in ([], ['']), \
+            f"Expected empty flag value for boolean true with bool_as_int=True, got {ranges_prop[0].value!r}"
+
+    def test_reserved_memory_ranges_true_no_existing_node_resolves_as_flag(self, tmp_path):
+        """Regression: serialize_json path must produce 'ranges;' not 'ranges = <0x1>;'.
+
+        When an SDT has no /reserved-memory node and the YAML introduces one
+        with 'ranges: true', the property goes through yaml.py's to_tree()
+        serialize_json path as a fresh LopperProp — bypassing the merge guard
+        in LopperProp.merge().  The bug was that the serialize_json pre-processing
+        loop left the Python bool True in place, which then became [1] inside
+        LopperProp.__setattr__, resolving to 'ranges = <0x1>;' in DTS output.
+        """
+        yaml_content = (
+            "reserved-memory:\n"
+            "  ranges: true\n"
+            "  \"#size-cells\": 2\n"
+            "  \"#address-cells\": 2\n"
+            "  cma@0:\n"
+            "    compatible: \"shared-dma-pool\"\n"
+            "    reusable: true\n"
+            "    size: 0x2DC6C00\n"
+        )
+        tree = self._yaml_tree(tmp_path, yaml_content, boolean_as_int=True)
+
+        resmem = tree["/reserved-memory"]
+        assert resmem is not None, "/reserved-memory node not found in tree"
+
+        ranges_prop = resmem.props("ranges")
+        assert ranges_prop, "'ranges' property not found under /reserved-memory"
+
+        prop = ranges_prop[0]
+        prop.resolve()
+        # Must be an empty/flag property — not [1] or [True]
+        assert prop.value in ([], ['']), \
+            f"ranges property value should be empty flag, got {prop.value!r}"
+        assert prop.string_val.strip() in ("ranges;", "ranges ;"), \
+            f"ranges resolved string should be 'ranges;', got {prop.string_val!r}"
+        assert "0x1" not in prop.string_val, \
+            f"ranges must not resolve to integer <0x1>; got {prop.string_val!r}"

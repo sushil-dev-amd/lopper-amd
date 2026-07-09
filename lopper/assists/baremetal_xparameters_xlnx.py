@@ -1,6 +1,6 @@
 #/*
 # * Copyright (c) 2020 Xilinx Inc. All rights reserved.
-# * Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc.  All rights reserved.
+# * Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc.  All rights reserved.
 # *
 # * Author:
 # *       Appana Durga Kedareswara rao <appana.durga.kedareswara.rao@amd.com>
@@ -512,6 +512,7 @@ def xlnx_generate_xparams(tgt_node, sdt, options):
         'xlnx,d-lmb':'XPAR_MICROBLAZE_RISCV_D_LMB',
         'xlnx,use-branch-target-cache':'XPAR_MICROBLAZE_RISCV_USE_BRANCH_TARGET_CACHE',
         'xlnx,branch-target-cache-size':'XPAR_MICROBLAZE_RISCV_BRANCH_TARGET_CACHE_SIZE',
+        'xlnx,addr-size':'XPAR_MICROBLAZE_RISCV_ADDR_SIZE',
         }
         ignore_else_part_lis = ['xlnx,freq','xlnx,dcache-byte-size','xlnx,icache-line-len',
                                 'xlnx,icache-byte-size','xlnx,use-fpu',]
@@ -553,6 +554,17 @@ def xlnx_generate_xparams(tgt_node, sdt, options):
             plat.buf(f"\n#define DDRMC5_DEVICE_TYPE_RDIMM\n")
         elif val == "UDIMMs":
             plat.buf(f"\n#define DDRMC5_DEVICE_TYPE_UDIMM\n")
+
+    #Define for DDRMC5_I2C_MASTER and DDRMC5_DEBUG_ELF
+    if sdt.tree[tgt_node].propval('xlnx,ddrmc5-i2c-master') != ['']:
+        val = sdt.tree[tgt_node].propval('xlnx,ddrmc5-i2c-master', list)[0]
+        plat.buf(f"\n/* DDRMC5_I2C_MASTER */")
+        plat.buf(f'\n#define DDRMC5_I2C_MASTER {val}\n')
+
+    if sdt.tree[tgt_node].propval('xlnx,ddrmc5-debug-elf') != ['']:
+        val = sdt.tree[tgt_node].propval('xlnx,ddrmc5-debug-elf', list)[0]
+        plat.buf(f"\n/* DDRMC5_DEBUG_ELF */")
+        plat.buf(f'\n#define DDRMC5_DEBUG_ELF {val}\n')
 
     #Define for XSEM_CFRSCAN_EN
     if sdt.tree[tgt_node].propval('semmem-scan') != ['']:
